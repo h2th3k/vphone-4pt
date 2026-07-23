@@ -315,6 +315,28 @@ if [[ "$IOS_VERSION" == 26.0* || "$IOS_VERSION" == 18.* ]]; then
     "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-iomfb-swapend "$DSC_DIR"
 fi
 
+# ═══════════ CoreBluetooth DSC patch (Bluetooth availability) ═════
+# The VM has no BT controller, so CoreBluetooth reports
+# CBManagerStateUnsupported and apps that gate on Bluetooth bail before
+# the permission flow engages. Patch -[CBManager state] -> PoweredOn and
+# +[CBManager authorization] -> AllowedAlways in the installed DSC so
+# every process sees a usable, authorized Bluetooth stack — no injection,
+# no jailbreak fingerprint. Idempotent. Set DISABLE_BT_DSC_PATCH=1 to skip.
+if [[ "${DISABLE_BT_DSC_PATCH:-0}" != "1" ]]; then
+    echo "  [*] Patching CoreBluetooth DSC (state -> PoweredOn, authorization -> AllowedAlways)..."
+    DSC_DIR="$MNT1/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld"
+    DSC_HEADER="$DSC_DIR/dyld_shared_cache_arm64e"
+    if [[ -f "$DSC_HEADER" ]]; then
+        if "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-bluetooth-dsc "$DSC_DIR" "$DSC_HEADER" --force; then
+            echo "  [+] CoreBluetooth DSC patch applied"
+        else
+            echo "  [!] CoreBluetooth DSC patch failed (continuing)"
+        fi
+    else
+        echo "  [-] CoreBluetooth DSC patch: $DSC_HEADER not found, skipping"
+    fi
+fi
+
 # ═══════════ 2/7 PATCH SEPUTIL ════════════════════════════════
 echo ""
 echo "[2/7] Patching seputil..."

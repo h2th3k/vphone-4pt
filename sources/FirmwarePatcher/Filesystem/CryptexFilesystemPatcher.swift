@@ -45,6 +45,9 @@ public final class CryptexFilesystemPatcher: Patcher {
     public let verbose: Bool
     public let noBinpack: Bool
     public let noVphoned: Bool
+    /// Skip the CoreBluetooth DSC patch (state -> PoweredOn, authorization ->
+    /// AllowedAlways). Mirrors `DISABLE_BT_DSC_PATCH` in the shell cfw_install path.
+    public let disableBtDscPatch: Bool
     let vphoneCliDirectory = URL(filePath: "./")
     
     var buildManiest: Data
@@ -53,12 +56,13 @@ public final class CryptexFilesystemPatcher: Patcher {
     
     // MARK: - Init
     
-    public init(buildManiest: Data, restoreDir: URL, verbose: Bool = true, noBinpack: Bool = false, noVphoned: Bool = false) {
+    public init(buildManiest: Data, restoreDir: URL, verbose: Bool = true, noBinpack: Bool = false, noVphoned: Bool = false, disableBtDscPatch: Bool = false) {
         self.buildManiest = buildManiest
         self.restoreDir = restoreDir
         self.verbose = verbose
         self.noBinpack = noBinpack
         self.noVphoned = noVphoned
+        self.disableBtDscPatch = disableBtDscPatch
     }
     
     deinit {
@@ -132,6 +136,11 @@ public final class CryptexFilesystemPatcher: Patcher {
             
             print("- Fix Dyld Cache")
             try addDyldSymlinks(targetMount: targetMount)
+            
+            if !disableBtDscPatch {
+                print("- Patch CoreBluetooth DSC (state -> PoweredOn, authorization -> AllowedAlways)")
+                try patchBluetoothDsc(targetMount: targetMount)
+            }
             
             let cfwInputOgPath = vphoneCliDirectory.appending(path: "scripts/resources/cfw_input.tar.zst")
             let cfwInputPath = try createTmpDir()
@@ -283,6 +292,7 @@ public final class CryptexFilesystemPatcher: Patcher {
             "-lsqlite3",
             "-framework", "Foundation",
             "-framework", "Security",
+            "-framework", "CoreBluetooth",
             "-framework", "CoreServices"
         ])
         
@@ -344,6 +354,31 @@ public final class CryptexFilesystemPatcher: Patcher {
         _ = try runProcess("/bin/ln", [
             "-sf", "../../../../System/Cryptexes/OS/System/DriverKit/System/Library/dyld",
             target.appending(path: "/System/DriverKit/System/Library/dyld").path
+        ])
+    }
+
+    /// Patch CoreBluetooth accessors in the merged SystemOS cryptex DSC so every
+    /// process sees `state = PoweredOn` and `authorization = AllowedAlways`. Same
+    /// patch as the shell `cfw_install` path (`cfw.py patch-bluetooth-dsc`), applied
+    /// here during the `less` build while the merged image is still mounted and before
+    /// the volume is re-sealed — so the patched DSC is baked into the new root hash
+    /// with no kernel/TXM SSV bypass (compatible with the patchless variant).
+    /// Idempotent (skips already-patched accessors). No-op if the DSC is absent.
+    func patchBluetoothDsc(targetMount: String) throws {
+        let dscDir = URL.init(filePath: targetMount)
+            .appending(path: "System/Cryptexes/OS/System/Library/Caches/com.apple.dyld")
+        let dscHeader = dscDir.appending(path: "dyld_shared_cache_arm64e")
+        guard FileManager.default.fileExists(atPath: dscHeader.path) else {
+            print("  [-] CoreBluetooth DSC patch: \(dscHeader.path) not found, skipping")
+            return
+        }
+        let pythonPath = vphoneCliDirectory.appending(path: ".venv/bin/python3")
+        let patcherPath = vphoneCliDirectory.appending(path: "scripts/patchers/cfw.py")
+        // `--force` because `-[CBManager state]` is a trivial ivar getter with no
+        // pacibsp prologue (matches the shell invocation in cfw_install_*.sh).
+        _ = try runProcess(pythonPath.path, [
+            patcherPath.path, "patch-bluetooth-dsc",
+            dscDir.path, dscHeader.path, "--force"
         ])
     }
     

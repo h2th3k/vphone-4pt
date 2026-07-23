@@ -349,6 +349,7 @@ fw_patch_less: patcher_build
 	--variant less \
 	$(if $(filter 1 true yes YES TRUE,$(NO_BINPACK)),--no-binpack,)
 	$(if $(filter 1 true yes YES TRUE,$(NO_VPHONED)),--no-vphoned,)
+	$(if $(filter 1 true yes YES TRUE,$(DISABLE_BT_DSC_PATCH)),--disable-bt-dsc-patch,)
 else
 fw_patch_less:
 	@echo "fw_patch_less must be run via sudo"

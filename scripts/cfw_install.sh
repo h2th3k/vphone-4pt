@@ -109,11 +109,17 @@ assert_mount_under_vm() {
 }
 
 # ── Find restore directory ─────────────────────────────────────
+# Tolerates a missing restore dir: on a re-install where the Cryptex is
+# already on the volume (and cached DMGs exist in .cfw_temp), the restore
+# dir / BuildManifest are not needed. Returns empty in that case; the
+# fresh-install branch below dies with a clear message if it's actually
+# required and absent.
 find_restore_dir() {
+    setopt local_options null_glob
     for dir in "$VM_DIR"/iPhone*_Restore; do
         [[ -f "$dir/BuildManifest.plist" ]] && echo "$dir" && return
     done
-    die "No restore directory found in $VM_DIR"
+    return 0
 }
 
 # ── Setup input resources ──────────────────────────────────────
@@ -177,7 +183,11 @@ echo "[*] cfw_install.sh — Installing CFW on vphone..."
 check_prereqs
 
 RESTORE_DIR=$(find_restore_dir)
-echo "[+] Restore directory: $RESTORE_DIR"
+if [[ -n "$RESTORE_DIR" ]]; then
+    echo "[+] Restore directory: $RESTORE_DIR"
+else
+    echo "[+] Restore directory: (none) — relying on already-installed Cryptex / cached DMGs"
+fi
 
 setup_cfw_input
 INPUT_DIR="$VM_DIR/$CFW_INPUT"
@@ -189,11 +199,17 @@ mkdir -p "$TEMP_DIR"
 # ── Parse Cryptex paths from BuildManifest ─────────────────────
 echo ""
 echo "[*] Parsing iPhone BuildManifest for Cryptex paths..."
-CRYPTEX_PATHS=$("$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" cryptex-paths "$RESTORE_DIR/iPhone-BuildManifest.plist")
-CRYPTEX_SYSOS=$(echo "$CRYPTEX_PATHS" | head -1)
-CRYPTEX_APPOS=$(echo "$CRYPTEX_PATHS" | tail -1)
-echo "  SystemOS: $CRYPTEX_SYSOS"
-echo "  AppOS:    $CRYPTEX_APPOS"
+if [[ -n "$RESTORE_DIR" && -f "$RESTORE_DIR/iPhone-BuildManifest.plist" ]]; then
+    CRYPTEX_PATHS=$("$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" cryptex-paths "$RESTORE_DIR/iPhone-BuildManifest.plist")
+    CRYPTEX_SYSOS=$(echo "$CRYPTEX_PATHS" | head -1)
+    CRYPTEX_APPOS=$(echo "$CRYPTEX_PATHS" | tail -1)
+    echo "  SystemOS: $CRYPTEX_SYSOS"
+    echo "  AppOS:    $CRYPTEX_APPOS"
+else
+    echo "  (BuildManifest unavailable; Cryptex must already be installed or cached DMGs present)"
+    CRYPTEX_SYSOS=""
+    CRYPTEX_APPOS=""
+fi
 
 # ═══════════ 1/7 INSTALL CRYPTEX ══════════════════════════════
 echo ""
@@ -222,6 +238,8 @@ if [[ "${CRYPTEX_OS_COUNT:-0}" -gt 0 && "${CRYPTEX_APP_COUNT:-0}" -gt 0 ]]; then
 
     echo "  [+] Cryptex skipped (already present)"
 else
+    # Fresh install path needs the restore dir to decrypt/copy the Cryptex DMGs.
+    [[ -n "$CRYPTEX_SYSOS" ]] || die "Cryptex not installed and no restore directory in $VM_DIR. Re-run: make restore"
     SYSOS_DMG="$TEMP_DIR/CryptexSystemOS.dmg"
     APPOS_DMG="$TEMP_DIR/CryptexAppOS.dmg"
     MNT_SYSOS="$TEMP_DIR/mnt_sysos"
@@ -296,6 +314,28 @@ if [[ "$IOS_VERSION" == 26.0* || "$IOS_VERSION" == 18.* ]]; then
     DSC_DIR="$MNT1/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld"
     [[ -d "$DSC_DIR" ]] || die "dyld cache dir missing: $DSC_DIR"
     "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-iomfb-swapend "$DSC_DIR"
+fi
+
+# ═══════════ CoreBluetooth DSC patch (Bluetooth availability) ═════
+# The VM has no BT controller, so CoreBluetooth reports
+# CBManagerStateUnsupported and apps that gate on Bluetooth bail before
+# the permission flow engages. Patch -[CBManager state] -> PoweredOn and
+# +[CBManager authorization] -> AllowedAlways in the installed DSC so
+# every process sees a usable, authorized Bluetooth stack — no injection,
+# no jailbreak fingerprint. Idempotent. Set DISABLE_BT_DSC_PATCH=1 to skip.
+if [[ "${DISABLE_BT_DSC_PATCH:-0}" != "1" ]]; then
+    echo "  [*] Patching CoreBluetooth DSC (state -> PoweredOn, authorization -> AllowedAlways)..."
+    DSC_DIR="$MNT1/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld"
+    DSC_HEADER="$DSC_DIR/dyld_shared_cache_arm64e"
+    if [[ -f "$DSC_HEADER" ]]; then
+        if "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-bluetooth-dsc "$DSC_DIR" "$DSC_HEADER" --force; then
+            echo "  [+] CoreBluetooth DSC patch applied"
+        else
+            echo "  [!] CoreBluetooth DSC patch failed (continuing)"
+        fi
+    else
+        echo "  [-] CoreBluetooth DSC patch: $DSC_HEADER not found, skipping"
+    fi
 fi
 
 # ═══════════ 2/7 PATCH SEPUTIL ════════════════════════════════
@@ -423,6 +463,7 @@ if [[ "$needs_vphoned_build" == "1" ]]; then
         -lsqlite3 \
         -framework Foundation \
         -framework Security \
+        -framework CoreBluetooth \
         -framework CoreServices
 fi
 cp "$VPHONED_BIN" "$TEMP_DIR/vphoned"

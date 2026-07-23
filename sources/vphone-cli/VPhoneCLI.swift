@@ -173,13 +173,17 @@ struct PatchFirmwareCLI: ParsableCommand {
     @Flag(name: .customLong("no-vphoned"), help: "Exclude vphoned from being installed (patchless-only).")
     var noVphoned: Bool = false
 
+    @Flag(name: .customLong("disable-bt-dsc-patch"), help: "Skip the CoreBluetooth DSC patch (patchless-only; mirrors DISABLE_BT_DSC_PATCH in the shell path).")
+    var disableBtDscPatch: Bool = false
+
     mutating func run() throws {
         let pipeline = FirmwarePipeline(
             vmDirectory: vmDirectory,
             variant: variant.pipelineVariant,
             verbose: !quiet,
             noBinpack: noBinpack,
-            noVphoned: noVphoned
+            noVphoned: noVphoned,
+            disableBtDscPatch: disableBtDscPatch
         )
         let records = try pipeline.patchAll()
 

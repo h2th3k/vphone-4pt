@@ -175,6 +175,7 @@ do NOT execute these).
 | 7   | cstring byte 5 mangle `'h' → 'X'` (`"kern.hv_vmm_present"` → `"kern.Xv_vmm_present"`) + per-page slot-hash re-attestation, BLACKLIST semantics — **EXP only** | DSC dylibs        | Companion to EXP kernel rename (`KernelEXPPatcher.patchHvVmmRename`). The mangle is applied to every DSC dylib EXCEPT those in `DONT_PATCH_INSTALL_NAMES` (sign-in / device-likeness consumers, ~15 entries). Patched dylibs query `kern.Xv_vmm_present` and get the truthful 1 (graphics / accel passthrough). Blacklisted dylibs keep the original cstring, hit ENOENT on the renamed kernel, cache 0, lie about VM presence. On `codeSigningMonitor == 2` hardware the byte-mangle alone causes `CODESIGNING/Invalid Page` SIGKILL because TXM enforces per-page hashes; the re-attestation pass recomputes the SHA-256 slot in the chunk's `CS_CodeDirectory` for every modified 16 KiB page. See `scripts/patchers/cfw_dsc_codesign.py` and `cfw_patch_hv_vmm_dsc.py`. |    -    |  -  |  -  |
 | 8   | (removed — was: standalone-binary mangle in 6 rootfs Mach-Os via SSH) | n/a               | Removed in the blacklist-flip redesign. With the EXP kernel rename in place, the 6 rootfs binaries (MobileActivationMigrator, CheckerBoard, StoreKitUISceneService, storekitd, appstored, CorePrescriptionService) get the desired "cache 0 / not in a VM" behavior for free: they keep their original cstring, hit ENOENT on the renamed kernel sysctl, defensive `cbnz w0, skip` leaves the cached byte at BSS-zero. No SSH-time standalone patch needed. |    -    |  -  |  -  |
 | 9   | `mov w3,#<size>` -> `mov w3,#0x560` in `_kern_SwapEnd` — **26.0/26.0.1 and 18.x** | DSC `IOMobileFramebuffer` | Fixes host VZ GUI black-screen with the available PCC vphone600 userclient: userland sends a smaller external-method-5 SwapEnd state than the 26.1-era 0x560 the userclient expects, so SwapEnd returns `kIOReturnBadArgument` and the host display stays black (guest still renders — the Apple logo is visible over VNC, just not in the vphone-cli view). Source sizes observed: 26.0/26.0.1 = 0x548, 18.6.2 = 0x514. The patcher is semantic (anchors on `mov w1,#5` -> `mov w3,#imm` -> `mov x4,#0`/`mov x5,#0` -> `bl` inside `_kern_SwapEnd`) and idempotent — rewrites the size to 0x560 regardless of source and re-attests the modified DSC page. Install gate fires when `ProductVersion` starts with `26.0` or `18.`. Validated after host install on `17,3_26.0_23A341`, `17,3_26.0.1_23A355`, and `17,3_18.6.2_22G100` (Apple logo now renders in the vphone-cli view); 26.1 remains unmodified. |    Y    |  Y  |  Y  |
+| 10  | `ldr x0,[x0,#0x30]; ret` -> `mov w0,#5; ret` in `-[CBManager state]` + `pacibsp;...` -> `mov w0,#3; ret` in `+[CBManager authorization]` | DSC `CoreBluetooth` | The VM has no Bluetooth controller, so `bluetoothd` reports none and CoreBluetooth returns `CBManagerStateUnsupported` (2); apps that gate startup on Bluetooth bail before the permission flow engages (`authorization` stays `notDetermined`). These two accessors are rewritten so every process sees `state = PoweredOn` (5) and `authorization = AllowedAlways` (3) — natively, no injected dylib, no jailbreak fingerprint. `state` is a trivial ivar getter (`ldr x0,[x0,#0x30]; ret`, no `pacibsp`) so the install invocation passes `--force`; `authorization` has a standard `pacibsp` prologue. Symbols resolved per-build via `ipsw dyld symaddr --image CoreBluetooth`. Idempotent (skips already-patched accessors). Applied to the installed DSC (`$MNT1/System/Cryptexes/OS/.../com.apple.dyld`) after the Cryptex copy, alongside the SwapEnd patch; set `DISABLE_BT_DSC_PATCH=1` to skip. Scope: passes the availability/permission gate only — does not provide real peripherals, so scan/connect finds nothing. Validated symbol resolution on `17,3_26.x` (state @ 0x1C0AC2920, authorization @ 0x1C0AC7AF8 in chunk `.21`). See `scripts/patchers/cfw_patch_bluetooth_dsc.py`. |    Y    |  Y  |  Y  |
 
 ### Installed Components
 
@@ -656,6 +657,7 @@ cache rebuild.
 | BaseBin hook deployment (`*.dylib` -> `/mnt1/cores`) | -                        | -                          | Y (JB-3)                                      | Y (JB-3)                                              |
 | First-boot JB finalization (`vphone_jb_setup.sh`) | -                           | -                          | Y (post-boot)                                 | Y (post-boot)                                         |
 | IOMobileFramebuffer SwapEnd payload-size patch (`26.0 and 26.0.1` only) | Y              | Y                          | Y (inherited from base run)                   | Y (inherited from base run)                           |
+| CoreBluetooth DSC patch (`-[CBManager state]` -> PoweredOn, `+[CBManager authorization]` -> AllowedAlways) | Y | Y           | Y (inherited from base run)                   | Y (inherited from base run; opt-out `DISABLE_BT_DSC_PATCH=1`) |
 | DSC pre-patch (`kern.hv_vmm_present` byte-5 mangle + slot reattest) | -         | -                          | -                                             | Y (pre-step, before base CFW)                         |
 | DSC camera patches (12 patches across CMCapture / CoreMediaIO / AVFCapture / libMobileGestalt) | - | -                  | -                                             | Y (pre-step, same cryptex mount as hv_vmm)            |
 | `watchdogd` surgical 2-insn patch + slot reattest | -                           | -                          | -                                             | Y (EXP-JB-3.5)                                        |
@@ -664,6 +666,26 @@ cache rebuild.
 | Additional input resources                    | `cfw_input`                     | `cfw_input` + `resources/cfw_dev/rpcserver_ios` | `cfw_input` + `cfw_jb_input` | `cfw_input` + `cfw_jb_input`        |
 | Extra tool requirement beyond base            | -                               | -                          | `zstd`                                        | `zstd`                                                |
 | Halt behavior                                 | Halts unless `CFW_SKIP_HALT=1`  | Halts unless `CFW_SKIP_HALT=1` | Always halts after JB phases              | Always halts after EXP phases                         |
+
+> **Patchless (`less`) variant:** does not run any `cfw_install_*.sh` flow above — it
+> builds its merged rootfs offline in `fw_patch_less` via the Swift
+> `CryptexFilesystemPatcher` (merging AppOS/SystemOS cryptexes, adding vphoned/binpack,
+> re-sealing the volume + manifest). The CoreBluetooth DSC patch is applied there too
+> (same `cfw.py patch-bluetooth-dsc`, invoked in `CryptexFilesystemPatcher.mergeFilesystems()`
+> right after the SystemOS cryptex copy, before the re-seal) so `less` also reports
+> `state = PoweredOn` / `authorization = AllowedAlways`. Opt-out is the same env var,
+> Makefile-translated: `DISABLE_BT_DSC_PATCH=1 make fw_patch_less` → `--disable-bt-dsc-patch`.
+> No kernel/TXM SSV bypass is involved — the patched DSC is baked into the new root hash.
+>
+> **iBSS patch (boot chain, required for restore):** `less` applies the same base iBSS
+> patcher as Regular/Dev — serial labels (2x) + `image4_validate_property_callback`
+> bypass (`b.ne`→NOP, `mov x0,x22`→`mov x0,#0`). The image4-callback bypass is
+> REQUIRED for the DFU restore: without it, the unpatched iBSS strictly validates the
+> hybrid TSS-personalized image, refuses to boot it, and the VM never re-enumerates
+> after the USB reset — so `pymobiledevice3`'s `_find()` busy-polls `libusb_get_device_list`
+> forever (the `less` restore hang at `send_component("iBSS")`→`reset()`). iBEC/LLB
+> already carried this bypass for `less`; iBSS now matches. No kernel/TXM patches are
+> added for `less` (runtime still relies on host `amfidont -S`).
 
 ## Summary
 
@@ -681,11 +703,11 @@ cache rebuild.
 | DeviceTree EXP identity properties |       - |   - |   - |   8 |
 | DeviceTree EXP node additions      |       - |   - |   - |   1 (`/product/camera`) |
 | Boot chain total                   |      46 |  58 | 117 | 132 |
-| CFW binary patches (base)          |       4 |   5 |   6 |   6 |
+| CFW binary patches (base)          |       5 |   6 |   7 |   7 |
 | CFW EXP-only steps                 |       - |   - |   - |   5 (hv_vmm DSC, camera DSC ×12, watchdogd EXP-JB-3.5, post-restore DT EXP-JB-6, build-version EXP-JB-7 opt-in) |
 | CFW installed components           |       6 |   7 |   9 |   9 |
-| CFW total                          |      10 |  12 |  15 |  31 |
-| Grand total                        |      56 |  70 | 132 | 163 |
+| CFW total                          |      11 |  13 |  16 |  32 |
+| Grand total                        |      57 |  71 | 133 | 164 |
 
 ## Ramdisk Variant Matrix
 

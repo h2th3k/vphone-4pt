@@ -26,6 +26,7 @@
 
 #import "vphoned_accessibility.h"
 #import "vphoned_apps.h"
+#import "vphoned_bluetooth.h"
 #import "vphoned_clipboard.h"
 #import "vphoned_devmode.h"
 #import "vphoned_files.h"
@@ -36,6 +37,7 @@
 #import "vphoned_notify.h"
 #import "vphoned_protocol.h"
 #import "vphoned_settings.h"
+#import "vphoned_tcc.h"
 #import "vphoned_url.h"
 #import "vphoned_vcam.h"
 
@@ -339,6 +341,8 @@ static BOOL handle_client(int fd) {
       [caps addObject:@"apps"];
     [caps addObject:@"url"];
     [caps addObject:@"settings"];
+    [caps addObject:@"tcc"];
+    [caps addObject:@"bluetooth"];
     [caps addObject:@"touch"];
 
     NSMutableDictionary *helloResp = [@{
@@ -448,6 +452,22 @@ static BOOL handle_client(int fd) {
         // Low power mode sync
         if ([t isEqualToString:@"low_power_mode"]) {
           NSDictionary *resp = vp_handle_notify_command(msg);
+          if (resp && !vp_write_message(fd, resp))
+            break;
+          continue;
+        }
+
+        // TCC permission helpers
+        if ([t hasPrefix:@"tcc_"]) {
+          NSDictionary *resp = vp_handle_tcc_command(msg);
+          if (resp && !vp_write_message(fd, resp))
+            break;
+          continue;
+        }
+
+        // Bluetooth diagnostics
+        if ([t hasPrefix:@"bluetooth_"]) {
+          NSDictionary *resp = vp_handle_bluetooth_command(msg);
           if (resp && !vp_write_message(fd, resp))
             break;
           continue;

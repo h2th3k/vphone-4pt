@@ -698,6 +698,35 @@ class VPhoneControl {
         _ = try await sendRequest(req)
     }
 
+    func grantBluetoothPermission(bundleId: String) async throws -> String {
+        let (resp, _) = try await sendRequest(["t": "tcc_grant_bluetooth", "bundle_id": bundleId])
+        return resp["msg"] as? String ?? "Bluetooth permission granted."
+    }
+
+    func bluetoothStatus() async throws -> String {
+        let (resp, _) = try await sendRequest(["t": "bluetooth_status"])
+        let core = resp["corebluetooth"] as? [String: Any]
+        let manager = resp["bluetooth_manager"] as? [String: Any]
+
+        let state = core?["state_name"] as? String ?? "unknown"
+        let auth = core?["authorization_name"] as? String ?? "unknown"
+        let delegateState = core?["delegate_state_name"] as? String ?? "unknown"
+
+        var managerParts: [String] = []
+        for key in ["available", "enabled", "powered", "isPowered", "powerState", "state"] {
+            if let value = manager?[key] {
+                managerParts.append("\(key)=\(value)")
+            }
+        }
+        let managerLine = managerParts.isEmpty ? "no BluetoothManager values" : managerParts.joined(separator: ", ")
+
+        return """
+        CoreBluetooth: state=\(state), authorization=\(auth)
+        Delegate state: \(delegateState)
+        BluetoothManager: \(managerLine)
+        """
+    }
+
     func lowPowerMode(enabled: Bool) async throws {
         let (resp, _) = try await sendRequest(["t": "low_power_mode", "enabled": enabled])
         let ok = resp["ok"] as? Bool ?? false

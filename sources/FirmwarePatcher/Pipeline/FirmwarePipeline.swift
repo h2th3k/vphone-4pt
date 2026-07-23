@@ -80,6 +80,9 @@ public final class FirmwarePipeline {
     let verbose: Bool
     let noBinpack: Bool
     let noVphoned: Bool
+    /// Skip the CoreBluetooth DSC patch on the `less` variant (mirrors the
+    /// `DISABLE_BT_DSC_PATCH` env var used by the shell cfw_install path).
+    let disableBtDscPatch: Bool
     let loader: any FirmwareLoader
 
     /// Set when the iPhone base is iOS 18.x (read from iPhone-BuildManifest.plist).
@@ -95,6 +98,7 @@ public final class FirmwarePipeline {
         verbose: Bool = true,
         noBinpack: Bool = false,
         noVphoned: Bool = false,
+        disableBtDscPatch: Bool = false,
         loader: (any FirmwareLoader)? = nil
     ) {
         self.vmDirectory = vmDirectory
@@ -102,6 +106,7 @@ public final class FirmwarePipeline {
         self.verbose = verbose
         self.noBinpack = noBinpack
         self.noVphoned = noVphoned
+        self.disableBtDscPatch = disableBtDscPatch
         self.loader = loader ?? ContainerFirmwareLoader()
     }
 
@@ -360,7 +365,7 @@ public final class FirmwarePipeline {
                 return switch variant {
                 case .less:
                     [{ data, verbose in
-                        CryptexFilesystemPatcher(buildManiest: data, restoreDir: try! self.findRestoreDirectory(), verbose: verbose, noBinpack: self.noBinpack, noVphoned: self.noVphoned)
+                        CryptexFilesystemPatcher(buildManiest: data, restoreDir: try! self.findRestoreDirectory(), verbose: verbose, noBinpack: self.noBinpack, noVphoned: self.noVphoned, disableBtDscPatch: self.disableBtDscPatch)
                     }]
                 case .regular, .dev, .jb, .exp:
                     []

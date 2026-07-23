@@ -44,6 +44,15 @@ Commands:
         dyld_shared_cache_arm64e file (not a chunk) used for
         `ipsw dyld symaddr` symbol resolution.
 
+    patch-bluetooth-dsc <chunks_dir> <dsc_header> [--dry-run] [--force]
+        Patch CoreBluetooth in the DSC so the guest reports a usable
+        Bluetooth stack despite having no BT controller: -[CBManager state]
+        -> return PoweredOn (5) and +[CBManager authorization] -> return
+        AllowedAlways (3). Lets apps that gate startup on Bluetooth
+        availability/permission proceed on the VM. Idempotent (skips
+        already-patched accessors). Needs --force because the state getter
+        is a trivial ldr/ret with no pacibsp prologue.
+
     patch-watchdogd <binary> [--dry-run]
         Surgical 2-instruction patch of /usr/libexec/watchdogd's
         sysctlbyname("kern.hv_vmm_present", ...) caching block so the
@@ -84,6 +93,7 @@ if __name__ == "__main__":
     from patchers.cfw_patch_hv_vmm_dsc import patch_hv_vmm_in_dsc
     from patchers.cfw_patch_iomfb_swapend import patch_iomfb_swapend
     from patchers.cfw_patch_camera_dsc import apply_all_camera_patches
+    from patchers.cfw_patch_bluetooth_dsc import apply_all_bluetooth_patches
     from patchers.cfw_patch_watchdogd import patch_watchdogd
     from patchers.cfw_daemons import parse_cryptex_paths, inject_daemons, patch_dropbear_plist
 else:
@@ -94,6 +104,7 @@ else:
     from .cfw_patch_hv_vmm_dsc import patch_hv_vmm_in_dsc
     from .cfw_patch_iomfb_swapend import patch_iomfb_swapend
     from .cfw_patch_camera_dsc import apply_all_camera_patches
+    from .cfw_patch_bluetooth_dsc import apply_all_bluetooth_patches
     from .cfw_patch_watchdogd import patch_watchdogd
     from .cfw_daemons import parse_cryptex_paths, inject_daemons, patch_dropbear_plist
 
@@ -170,6 +181,15 @@ def main():
         apply_all_camera_patches(sys.argv[2], sys.argv[3], dry_run=dry_run, force=force)
         sys.exit(0)
 
+    elif cmd == "patch-bluetooth-dsc":
+        if len(sys.argv) < 4:
+            print("Usage: patch_cfw.py patch-bluetooth-dsc <chunks_dir> <dsc_header> [--dry-run] [--force]")
+            sys.exit(1)
+        dry_run = "--dry-run" in sys.argv[4:]
+        force   = "--force"   in sys.argv[4:]
+        apply_all_bluetooth_patches(sys.argv[2], sys.argv[3], dry_run=dry_run, force=force)
+        sys.exit(0)
+
     elif cmd == "patch-watchdogd":
         if len(sys.argv) < 3:
             print("Usage: patch_cfw.py patch-watchdogd <binary> [--dry-run]")
@@ -221,7 +241,7 @@ def main():
     else:
         print(f"Unknown command: {cmd}")
         print("Commands: cryptex-paths, patch-seputil, patch-launchd-cache-loader, patch-camera-dsc,")
-        print("          patch-mobileactivationd, patch-launchd-jetsam,")
+        print("          patch-bluetooth-dsc, patch-mobileactivationd, patch-launchd-jetsam,")
         print("          patch-hv-vmm-dsc, patch-iomfb-swapend, patch-watchdogd,")
         print("          inject-daemons, patch-dropbear-plist, inject-dylib")
         sys.exit(1)
