@@ -61,6 +61,23 @@ extension VPhoneMenuController {
         settingsSetItem = settingsSet
         menu.addItem(settingsSet)
 
+        let bluetoothStatus = makeItem("Bluetooth Status", action: #selector(queryBluetoothStatus))
+        bluetoothStatus.isEnabled = false
+        bluetoothStatusItem = bluetoothStatus
+        menu.addItem(bluetoothStatus)
+
+        let appDyldInsert = makeItem("Set App DYLD Insert...", action: #selector(setAppDyldInsert))
+        appDyldInsert.isEnabled = false
+        appDyldInsertItem = appDyldInsert
+        menu.addItem(appDyldInsert)
+
+        let grantBluetooth = makeItem(
+            "Grant Bluetooth Permission...", action: #selector(grantBluetoothPermission)
+        )
+        grantBluetooth.isEnabled = false
+        tccGrantBluetoothItem = grantBluetooth
+        menu.addItem(grantBluetooth)
+
         menu.addItem(NSMenuItem.separator())
 
         menu.addItem(buildLocationSubmenu())
@@ -74,6 +91,9 @@ extension VPhoneMenuController {
     func updateSettingsAvailability(available: Bool) {
         settingsGetItem?.isEnabled = available
         settingsSetItem?.isEnabled = available
+        bluetoothStatusItem?.isEnabled = available
+        appDyldInsertItem?.isEnabled = available
+        tccGrantBluetoothItem?.isEnabled = available
     }
 
     func updateConnectAvailability(available: Bool) {
@@ -369,6 +389,134 @@ extension VPhoneMenuController {
                 )
             } catch {
                 showAlert(title: "Write Setting", message: "\(error)", style: .warning)
+            }
+        }
+    }
+
+    @objc func grantBluetoothPermission() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 150),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Grant Bluetooth Permission"
+        panel.center()
+
+        let lbl = NSTextField(labelWithString: "Bundle ID:")
+        lbl.frame = NSRect(x: 20, y: 100, width: 400, height: 18)
+
+        let bundleField = NSTextField(frame: NSRect(x: 20, y: 70, width: 400, height: 22))
+        bundleField.placeholderString = "com.example.app"
+
+        let ok = NSButton(frame: NSRect(x: 330, y: 12, width: 90, height: 28))
+        ok.title = "Grant"
+        ok.bezelStyle = .rounded
+        ok.keyEquivalent = "\r"
+        ok.target = self
+        ok.action = #selector(VPhoneMenuController.confirmModal)
+
+        let cancel = NSButton(frame: NSRect(x: 230, y: 12, width: 90, height: 28))
+        cancel.title = "Cancel"
+        cancel.bezelStyle = .rounded
+        cancel.keyEquivalent = "\u{1b}"
+        cancel.target = NSApp
+        cancel.action = #selector(NSApplication.abortModal)
+
+        panel.contentView?.addSubview(lbl)
+        panel.contentView?.addSubview(bundleField)
+        panel.contentView?.addSubview(ok)
+        panel.contentView?.addSubview(cancel)
+
+        let response = NSApp.runModal(for: panel)
+        panel.orderOut(nil)
+
+        let bundleId = bundleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard response == .OK, !bundleId.isEmpty else { return }
+
+        Task {
+            do {
+                let msg = try await control.grantBluetoothPermission(bundleId: bundleId)
+                showAlert(title: "Bluetooth Permission", message: msg, style: .informational)
+            } catch {
+                showAlert(title: "Bluetooth Permission", message: "\(error)", style: .warning)
+            }
+        }
+    }
+
+    @objc func queryBluetoothStatus() {
+        Task {
+            do {
+                let msg = try await control.bluetoothStatus()
+                showAlert(title: "Bluetooth Status", message: msg, style: .informational)
+            } catch {
+                showAlert(title: "Bluetooth Status", message: "\(error)", style: .warning)
+            }
+        }
+    }
+
+    @objc func setAppDyldInsert() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 190),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Set App DYLD Insert"
+        panel.center()
+
+        let bundleLabel = NSTextField(labelWithString: "Bundle ID:")
+        bundleLabel.frame = NSRect(x: 20, y: 140, width: 480, height: 18)
+
+        let bundleField = NSTextField(frame: NSRect(x: 20, y: 112, width: 480, height: 22))
+        bundleField.placeholderString = "com.example.app"
+
+        let dylibLabel = NSTextField(labelWithString: "Guest dylib path:")
+        dylibLabel.frame = NSRect(x: 20, y: 82, width: 480, height: 18)
+
+        let dylibField = NSTextField(frame: NSRect(x: 20, y: 54, width: 480, height: 22))
+        // Must match an on-disk path the sandboxed app can read (/usr/lib is RO).
+        dylibField.placeholderString =
+            "/var/mobile/Containers/Data/Application/<UUID>/Library/Caches/NoopInject.dylib"
+        dylibField.stringValue = ""
+
+        let ok = NSButton(frame: NSRect(x: 410, y: 12, width: 90, height: 28))
+        ok.title = "Set"
+        ok.bezelStyle = .rounded
+        ok.keyEquivalent = "\r"
+        ok.target = self
+        ok.action = #selector(VPhoneMenuController.confirmModal)
+
+        let cancel = NSButton(frame: NSRect(x: 310, y: 12, width: 90, height: 28))
+        cancel.title = "Cancel"
+        cancel.bezelStyle = .rounded
+        cancel.keyEquivalent = "\u{1b}"
+        cancel.target = NSApp
+        cancel.action = #selector(NSApplication.abortModal)
+
+        panel.contentView?.addSubview(bundleLabel)
+        panel.contentView?.addSubview(bundleField)
+        panel.contentView?.addSubview(dylibLabel)
+        panel.contentView?.addSubview(dylibField)
+        panel.contentView?.addSubview(ok)
+        panel.contentView?.addSubview(cancel)
+
+        let response = NSApp.runModal(for: panel)
+        panel.orderOut(nil)
+
+        let bundleId = bundleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dylibPath = dylibField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard response == .OK, !bundleId.isEmpty, !dylibPath.isEmpty else { return }
+
+        Task {
+            do {
+                let msg = try await control.setAppEnvironment(
+                    bundleId: bundleId,
+                    environment: ["DYLD_INSERT_LIBRARIES": dylibPath]
+                )
+                showAlert(title: "Set App DYLD Insert", message: msg, style: .informational)
+            } catch {
+                showAlert(title: "Set App DYLD Insert", message: "\(error)", style: .warning)
             }
         }
     }

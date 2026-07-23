@@ -24,6 +24,9 @@ class VPhoneMenuController {
     var appsOpenURLItem: NSMenuItem?
     var settingsGetItem: NSMenuItem?
     var settingsSetItem: NSMenuItem?
+    var bluetoothStatusItem: NSMenuItem?
+    var appDyldInsertItem: NSMenuItem?
+    var tccGrantBluetoothItem: NSMenuItem?
     var touchIDMonitor: VPhoneTouchIDMonitor? {
         didSet { touchIDMonitor?.isEnabled = touchIDMenuItem?.state == .on }
     }

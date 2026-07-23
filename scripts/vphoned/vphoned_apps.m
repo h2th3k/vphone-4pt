@@ -7,7 +7,9 @@
 
 #import "vphoned_apps.h"
 #import "vphoned_protocol.h"
+#import <dispatch/dispatch.h>
 #include <dlfcn.h>
+#include <mach/mach.h>
 #include <objc/message.h>
 #include <signal.h>
 #include <unistd.h>
@@ -15,6 +17,7 @@
 // MARK: - Private API Declarations
 
 @interface LSApplicationProxy : NSObject
++ (instancetype)applicationProxyForIdentifier:(NSString *)identifier;
 @property(readonly) NSString *bundleIdentifier;
 @property(readonly) NSString *localizedName;
 @property(readonly) NSString *shortVersionString;
@@ -27,6 +30,7 @@
 + (instancetype)defaultWorkspace;
 - (NSArray *)allInstalledApplications;
 - (BOOL)openApplicationWithBundleID:(NSString *)bundleID;
+- (BOOL)registerApplicationDictionary:(NSDictionary *)dictionary;
 @end
 
 // FBSSystemService loaded via dlsym
@@ -80,6 +84,207 @@ static NSString *state_for_pid(pid_t pid) {
   return @"not_running";
 }
 
+static void terminate_application(NSString *bundleID) {
+  if (gFBSSystemServiceClass) {
+    id service = ((id (*)(Class, SEL))objc_msgSend)(
+        gFBSSystemServiceClass, sel_registerName("sharedService"));
+    if (service) {
+      ((void (*)(id, SEL, id, int, BOOL, id))objc_msgSend)(
+          service,
+          sel_registerName(
+              "terminateApplication:forReason:andReport:withDescription:"),
+          bundleID, 5, NO, @"vphoned dyld-insert relaunch");
+    }
+  }
+  pid_t pid = pid_for_app(bundleID);
+  if (pid > 0)
+    kill(pid, SIGKILL);
+}
+
+/// Wait until FrontBoard no longer reports a live pid for bundleID.
+static BOOL wait_until_terminated(NSString *bundleID, int timeoutMs) {
+  int waited = 0;
+  while (waited < timeoutMs) {
+    if (pid_for_app(bundleID) <= 0)
+      return YES;
+    usleep(100000);
+    waited += 100;
+  }
+  return pid_for_app(bundleID) <= 0;
+}
+
+// Launch after LS EnvironmentVariables registration. Tries several open paths;
+// records which one succeeded via *methodOut (caller-owned NSString*).
+static BOOL open_application_with_environment(NSString *bundleID,
+                                              NSDictionary *environment,
+                                              NSString **methodOut) {
+  NSDictionary *env = environment ?: @{};
+  // Multiple keys because option names differ across iOS / FrontBoard revisions.
+  NSDictionary *options = @{
+    @"__Environment" : env,
+    @"Environment" : env,
+    @"environment" : env,
+    @"EnvironmentVariables" : env,
+  };
+
+  LSApplicationWorkspace *ws = [LSApplicationWorkspace defaultWorkspace];
+
+  // 1) Plain LS open — relies on the EnvironmentVariables we just registered.
+  //    On regular (get-task-allow forced + dyld policy patched) this is often
+  //    enough once the process is truly dead first.
+  {
+    BOOL ok = [ws openApplicationWithBundleID:bundleID];
+    if (ok) {
+      if (methodOut)
+        *methodOut = @"ls_open";
+      return YES;
+    }
+  }
+
+  // 2) LS open with options dict (if available)
+  SEL lsOpenOpts = sel_registerName("openApplicationWithBundleID:options:");
+  if ([ws respondsToSelector:lsOpenOpts]) {
+    BOOL ok = ((BOOL(*)(id, SEL, id, id))objc_msgSend)(ws, lsOpenOpts,
+                                                       bundleID, options);
+    if (ok) {
+      if (methodOut)
+        *methodOut = @"ls_open_options";
+      return YES;
+    }
+  }
+
+  if (!gFBSSystemServiceClass) {
+    if (methodOut)
+      *methodOut = @"no_fbs";
+    return NO;
+  }
+  id service = ((id (*)(Class, SEL))objc_msgSend)(
+      gFBSSystemServiceClass, sel_registerName("sharedService"));
+  if (!service) {
+    if (methodOut)
+      *methodOut = @"no_fbs_service";
+    return NO;
+  }
+
+  // 3) FBS openApplication:options:withResult: (no client port)
+  SEL openNoPort = sel_registerName("openApplication:options:withResult:");
+  if ([service respondsToSelector:openNoPort]) {
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block BOOL launched = NO;
+    __block NSString *errDesc = nil;
+    ((void (*)(id, SEL, id, id, id))objc_msgSend)(
+        service, openNoPort, bundleID, options, ^(NSError *error) {
+          launched = (error == nil);
+          errDesc = error.localizedDescription;
+          dispatch_semaphore_signal(sem);
+        });
+    long timedOut = dispatch_semaphore_wait(
+        sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)8 * NSEC_PER_SEC));
+    if (timedOut == 0 && launched) {
+      if (methodOut)
+        *methodOut = @"fbs_open";
+      return YES;
+    }
+    if (methodOut)
+      *methodOut = [NSString
+          stringWithFormat:@"fbs_open_fail:%@", errDesc ?: @"timeout"];
+  }
+
+  // 4) FBS openApplication:options:clientPort:withResult: with a real port
+  SEL openPort =
+      sel_registerName("openApplication:options:clientPort:withResult:");
+  SEL createPort = sel_registerName("createClientPort");
+  SEL cleanupPort = sel_registerName("cleanupClientPort:");
+  if ([service respondsToSelector:openPort] &&
+      [service respondsToSelector:createPort]) {
+    mach_port_t port =
+        ((mach_port_t(*)(id, SEL))objc_msgSend)(service, createPort);
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block BOOL launched = NO;
+    __block NSString *errDesc = nil;
+    ((void (*)(id, SEL, id, id, mach_port_t, id))objc_msgSend)(
+        service, openPort, bundleID, options, port, ^(NSError *error) {
+          launched = (error == nil);
+          errDesc = error.localizedDescription;
+          dispatch_semaphore_signal(sem);
+        });
+    long timedOut = dispatch_semaphore_wait(
+        sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)8 * NSEC_PER_SEC));
+    if ([service respondsToSelector:cleanupPort]) {
+      ((void (*)(id, SEL, mach_port_t))objc_msgSend)(service, cleanupPort,
+                                                     port);
+    }
+    if (timedOut == 0 && launched) {
+      if (methodOut)
+        *methodOut = @"fbs_open_port";
+      return YES;
+    }
+    if (methodOut)
+      *methodOut = [NSString
+          stringWithFormat:@"fbs_port_fail:%@", errDesc ?: @"timeout"];
+  }
+
+  if (methodOut && *methodOut == nil)
+    *methodOut = @"all_open_failed";
+  return NO;
+}
+
+static NSDictionary *environment_for_proxy(LSApplicationProxy *proxy,
+                                           NSDictionary *extraEnvironment) {
+  NSMutableDictionary *env = [NSMutableDictionary dictionary];
+  NSString *containerPath = proxy.dataContainerURL.path;
+  if (containerPath.length > 0) {
+    env[@"CFFIXED_USER_HOME"] = containerPath;
+    env[@"HOME"] = containerPath;
+    env[@"TMPDIR"] = [containerPath stringByAppendingPathComponent:@"tmp"];
+  } else {
+    env[@"CFFIXED_USER_HOME"] = @"/var/mobile";
+    env[@"HOME"] = @"/var/mobile";
+    env[@"TMPDIR"] = @"/var/tmp";
+  }
+
+  for (NSString *key in extraEnvironment) {
+    id value = extraEnvironment[key];
+    if ([key isKindOfClass:[NSString class]] &&
+        [value isKindOfClass:[NSString class]] && key.length > 0) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
+static NSDictionary *registration_dictionary_for_proxy(
+    LSApplicationProxy *proxy, NSDictionary *extraEnvironment) {
+  NSString *bundlePath = proxy.bundleURL.path;
+  NSDictionary *info =
+      [NSDictionary dictionaryWithContentsOfFile:[bundlePath stringByAppendingPathComponent:@"Info.plist"]];
+  NSString *bundleID = proxy.bundleIdentifier ?: info[@"CFBundleIdentifier"];
+  if (bundleID.length == 0 || bundlePath.length == 0)
+    return nil;
+
+  NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+  dict[@"ApplicationType"] = proxy.applicationType ?: @"User";
+  dict[@"CFBundleIdentifier"] = bundleID;
+  dict[@"CodeInfoIdentifier"] = bundleID;
+  dict[@"CompatibilityState"] = @0;
+  dict[@"IsContainerized"] = @YES;
+  dict[@"Path"] = bundlePath;
+  dict[@"IsDeletable"] = @YES;
+  dict[@"LSInstallType"] = @1;
+  dict[@"HasMIDBasedSINF"] = @0;
+  dict[@"MissingSINF"] = @0;
+  dict[@"FamilyID"] = @0;
+  dict[@"IsOnDemandInstallCapable"] = @0;
+
+  NSString *containerPath = proxy.dataContainerURL.path;
+  if (containerPath.length > 0)
+    dict[@"Container"] = containerPath;
+  dict[@"EnvironmentVariables"] =
+      environment_for_proxy(proxy, extraEnvironment ?: @{});
+
+  return dict;
+}
+
 // MARK: - Command Handler
 
 NSDictionary *vp_handle_apps_command(NSDictionary *msg) {
@@ -127,6 +332,89 @@ NSDictionary *vp_handle_apps_command(NSDictionary *msg) {
 
     NSMutableDictionary *r = vp_make_response(@"app_list", reqId);
     r[@"apps"] = result;
+    return r;
+  }
+
+  // -- app_set_environment --
+  if ([type isEqualToString:@"app_set_environment"]) {
+    NSString *bundleID = msg[@"bundle_id"];
+    NSDictionary *environment = msg[@"environment"];
+    if (bundleID.length == 0 || ![environment isKindOfClass:[NSDictionary class]]) {
+      NSMutableDictionary *r = vp_make_response(@"err", reqId);
+      r[@"msg"] = @"missing bundle_id or environment";
+      return r;
+    }
+
+    LSApplicationProxy *proxy =
+        [LSApplicationProxy applicationProxyForIdentifier:bundleID];
+    if (!proxy || proxy.bundleURL.path.length == 0) {
+      NSMutableDictionary *r = vp_make_response(@"err", reqId);
+      r[@"msg"] = [NSString stringWithFormat:@"app not found: %@", bundleID];
+      return r;
+    }
+
+    NSDictionary *registration =
+        registration_dictionary_for_proxy(proxy, environment);
+    if (!registration) {
+      NSMutableDictionary *r = vp_make_response(@"err", reqId);
+      r[@"msg"] = @"failed to build registration dictionary";
+      return r;
+    }
+
+    LSApplicationWorkspace *ws = [LSApplicationWorkspace defaultWorkspace];
+    BOOL ok = [ws registerApplicationDictionary:registration];
+    if (!ok) {
+      NSMutableDictionary *r = vp_make_response(@"err", reqId);
+      r[@"ok"] = @NO;
+      r[@"msg"] = @"LaunchServices registration update failed";
+      return r;
+    }
+
+    // Persist env via LS, then force a cold start so DYLD_* is applied.
+    terminate_application(bundleID);
+    BOOL died = wait_until_terminated(bundleID, 3000);
+    if (!died) {
+      // Last-ditch hard kill by pid if FrontBoard still reports it alive.
+      pid_t stuck = pid_for_app(bundleID);
+      if (stuck > 0)
+        kill(stuck, SIGKILL);
+      died = wait_until_terminated(bundleID, 2000);
+    }
+
+    NSString *method = nil;
+    BOOL launched =
+        open_application_with_environment(bundleID, environment, &method);
+    usleep(800000);
+    pid_t pid = pid_for_app(bundleID);
+
+    // Host/guest-visible breadcrumb: proves vphoned applied the path even if
+    // the target app ctor never runs.
+    {
+      NSString *dylib = environment[@"DYLD_INSERT_LIBRARIES"];
+      NSString *crumb = [NSString
+          stringWithFormat:
+              @"bundle=%@\ndyld=%@\ndied=%d\nlaunched=%d\nmethod=%@\npid=%d\n",
+              bundleID, dylib ?: @"(nil)", died ? 1 : 0, launched ? 1 : 0,
+              method ?: @"(none)", pid];
+      [crumb writeToFile:@"/var/mobile/Library/Caches/vphone-dyld-insert-set.txt"
+              atomically:YES
+                encoding:NSUTF8StringEncoding
+                   error:nil];
+    }
+
+    NSMutableDictionary *r = vp_make_response(@"app_set_environment", reqId);
+    r[@"ok"] = @YES;
+    r[@"launched"] = @(launched);
+    r[@"died"] = @(died);
+    r[@"method"] = method ?: @"";
+    r[@"pid"] = @(pid > 0 ? pid : 0);
+    r[@"environment"] = registration[@"EnvironmentVariables"] ?: @{};
+    r[@"msg"] = [NSString
+        stringWithFormat:
+            @"registered + relaunch (died=%@ launched=%@ method=%@ pid=%d). "
+            @"Check app Caches for vphone-noop-inject-loaded.txt",
+            died ? @"yes" : @"no", launched ? @"yes" : @"no",
+            method ?: @"(none)", pid];
     return r;
   }
 

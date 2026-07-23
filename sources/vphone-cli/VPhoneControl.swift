@@ -663,6 +663,15 @@ class VPhoneControl {
         _ = try await sendRequest(["t": "app_terminate", "bundle_id": bundleId])
     }
 
+    func setAppEnvironment(bundleId: String, environment: [String: String]) async throws -> String {
+        let (resp, _) = try await sendRequest([
+            "t": "app_set_environment",
+            "bundle_id": bundleId,
+            "environment": environment,
+        ])
+        return resp["msg"] as? String ?? "Updated app environment."
+    }
+
     func appForeground() async throws -> (bundleId: String, name: String, pid: Int) {
         let (resp, _) = try await sendRequest(["t": "app_foreground"])
         return (
@@ -963,7 +972,7 @@ class VPhoneControl {
         case "file_get", "file_put", "ipa_install":
             transferRequestTimeout
         case "devmode", "file_list", "file_delete", "file_rename", "file_mkdir", "keychain_list",
-             "app_list", "app_launch", "open_url", "accessibility_tree":
+             "app_list", "app_launch", "app_set_environment", "open_url", "accessibility_tree":
             slowRequestTimeout
         default:
             defaultRequestTimeout
