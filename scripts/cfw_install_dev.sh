@@ -462,6 +462,7 @@ if [[ "$needs_vphoned_build" == "1" ]]; then
         -lsqlite3 \
         -framework Foundation \
         -framework Security \
+        -framework CoreBluetooth \
         -framework CoreServices
 fi
 cp "$VPHONED_BIN" "$TEMP_DIR/vphoned"
