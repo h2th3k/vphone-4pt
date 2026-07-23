@@ -102,6 +102,9 @@ final class VPhoneCameraServer {
                 sourceKind = .off
             }
         }
+        if kind != .off, !isConnected {
+            attemptConnect()
+        }
         if wasStreaming, producer != nil {
             startStreaming()
         }
@@ -175,6 +178,11 @@ final class VPhoneCameraServer {
 
     private func attemptConnect() {
         guard let device else { return }
+        // Only connect when a camera source is selected. Without this, the
+        // server starts a permanent retry loop at boot that spams the log
+        // every 3s when the guest-side cameracaptured receiver is absent.
+        // The loop is kicked on demand from setSource instead.
+        guard sourceKind != .off else { return }
         connectionAttemptToken &+= 1
         let attemptToken = connectionAttemptToken
         device.connect(toPort: Self.vsockPort) {
